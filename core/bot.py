@@ -1,9 +1,6 @@
-"""
-主 Bot 逻辑 - 使用 aiogram 3.x
-"""
-import asyncio
-import logging
+# ███╗   ██╗ ██████╗ ██████╗ ███████╗███████╗███████╗███████╗██╗  ██╗     ██████╗  ██████╗ ████████╗import asyncio
 
+from loguru import logger
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
@@ -13,13 +10,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from core.config import settings
 from core.store import DataStore
 from core.code_manager import CodeManager
-# 延迟导入，避免循环依赖
-# from api.nodeseek import NodeSeekAPI
-from services.nodeseek_poller import NodeSeekPoller
+from core.lucky_engine import LuckyEngine
+from api.forum import ForumAPI
+from services.forum_poller import ForumPoller
+from services.lucky_scheduler import LuckyScheduler
 from handlers.admin import setup_admin_handlers
 from handlers.guest import setup_guest_handlers
-
-logger = logging.getLogger(__name__)
 
 
 class BotApp:
@@ -30,26 +26,54 @@ class BotApp:
         self.dp = Dispatcher()
         self.store = DataStore()
         self.code_mgr = CodeManager(self.store)
-        
-        # 延迟导入，避免循环依赖
-        from api.nodeseek import NodeSeekAPI
-        self.ns = NodeSeekAPI()
-        
+
+        proxy = (settings.proxy_host, settings.proxy_port)
+
+        # NodeSeek（必须）
+        self.ns = ForumAPI('nodeseek', 'https://www.nodeseek.com',
+                           settings.nodeseek_cookies, *proxy)
+        self.apis = {'nodeseek': self.ns}
+
+        # DeepFlood（可选）
+        if settings.deepflood_cookies:
+            self.df = ForumAPI('deepflood', 'https://www.deepflood.com',
+                               settings.deepflood_cookies, *proxy)
+            self.apis['deepflood'] = self.df
+
+        self.pollers = [ForumPoller(api, self.store, self.code_mgr, self.bot)
+                        for api in self.apis.values()]
+
+        self.lucky_engine = LuckyEngine(self.apis, self.store, self.bot, settings.tg_admin_uid)
+        self.lucky_scheduler = LuckyScheduler(self.lucky_engine, self.store)
+
         self.scheduler = AsyncIOScheduler()
-        self.poller = NodeSeekPoller(self.ns, self.store, self.code_mgr, self.bot)
         self._webhook_secret = None
-        
-        # 注册处理器
+
         self._setup_handlers()
     
     def _setup_handlers(self):
         """设置消息处理器"""
-        setup_admin_handlers(self.dp, self.store, self.bot)
-        setup_guest_handlers(self.dp, self.store, self.code_mgr, self.bot)
+        setup_admin_handlers(self.dp, self.store, self.bot, self.apis, self.lucky_engine)
+        setup_guest_handlers(self.dp, self.store, self.code_mgr, self.bot, self.pollers)
     
     async def startup(self):
         """启动初始化"""
         logger.info("正在启动 Bot...")
+
+        # 验证 cookies 并自动检测各平台 UID
+        loop = asyncio.get_event_loop()
+        for platform, api in self.apis.items():
+            valid = await loop.run_in_executor(None, api.check_cookies)
+            if not valid:
+                logger.warning(f"[{platform}] cookies 无效，跳过 UID 检测")
+                continue
+            key = f'{platform}_admin_uid'
+            if not self.store.get_config(key):
+                uid = await loop.run_in_executor(None, api.get_self_uid)
+                if uid:
+                    self.store.set_config(key, uid)
+                else:
+                    logger.warning(f"[{platform}] 无法自动检测 UID，私信验证链接将无法生成")
         
         # 设置 webhook
         if settings.webhook_url:
@@ -62,27 +86,28 @@ class BotApp:
         # 启动定时任务
         if not self.scheduler.running:
             # 检查是否已有相同的 job
-            try:
-                self.scheduler.remove_job('nodeseek_poll')
-            except:
-                pass
-            
-            try:
-                self.scheduler.remove_job('cleanup')
-            except:
-                pass
-            
-            self.scheduler.add_job(
-                self.poller.poll,
-                'interval',
-                seconds=settings.poll_interval,
-                id='nodeseek_poll'
-            )
+            for poller in self.pollers:
+                try:
+                    self.scheduler.remove_job(f'{poller.platform}_poll')
+                except Exception:
+                    pass
+                self.scheduler.add_job(
+                    poller.poll,
+                    'interval',
+                    seconds=settings.poll_interval,
+                    id=f'{poller.platform}_poll'
+                )
             self.scheduler.add_job(
                 self._cleanup_expired,
                 'interval',
                 hours=1,
                 id='cleanup'
+            )
+            self.scheduler.add_job(
+                self.lucky_scheduler.tick,
+                'interval',
+                minutes=1,
+                id='lucky_tick'
             )
             self.scheduler.start()
         
@@ -95,8 +120,8 @@ class BotApp:
         self.scheduler.shutdown()
         await self.bot.delete_webhook()
         await self.bot.session.close()
-        self.ns.close()
-        self.store.close()
+        for api in self.apis.values():
+            api.close()
         
         logger.info("Bot 已停止")
     
@@ -116,8 +141,6 @@ class BotApp:
     
     async def run(self):
         """运行 Bot"""
-        await self.startup()
-        
         if settings.webhook_url:
             # Webhook 模式 - 使用 aiohttp 启动 web 服务
             from aiohttp import web
@@ -138,6 +161,9 @@ class BotApp:
             app = web.Application()
             app.router.add_post('/webhook', webhook_handler)
             app.router.add_get('/health', health_check)
+
+            from handlers.lucky_webhook import create_lucky_webhook_handler
+            app.router.add_post('/lucky-webhook', create_lucky_webhook_handler(self.store, self.lucky_engine))
             
             runner = web.AppRunner(app)
             await runner.setup()

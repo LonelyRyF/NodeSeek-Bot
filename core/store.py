@@ -1,46 +1,40 @@
-"""
-数据存储 - 使用 TinyDB
-"""
-import os
-import logging
-from typing import Optional, Set, Dict
+# ███╗   ██╗ ██████╗ ██████╗ ███████╗███████╗███████╗███████╗██╗  ██╗     ██████╗  ██████╗ ████████╗import os
+from loguru import logger
+from typing import Optional, Dict, List
 from datetime import datetime
 
 from tinydb import TinyDB, Query
 from tinydb.storages import JSONStorage
-from tinydb.middlewares import CachingMiddleware
 
-from core.config import settings
-from core.models import VerificationCode, UserState
+from core.models import VerificationCode, UserState, LuckyTask
 
-logger = logging.getLogger(__name__)
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_FILE = os.path.join(_BASE_DIR, 'data', 'data.json')
 
 
 class DataStore:
     """TinyDB 数据存储"""
-    
+
     def __init__(self):
-        self._ensure_dir()
-        # 使用 CachingMiddleware 提高性能
-        self.db = TinyDB(
-            settings.data_file,
-            storage=CachingMiddleware(JSONStorage)
-        )
-        self.codes = self.db.table('codes')
-        self.users = self.db.table('users')
-        self.msg_map = self.db.table('msg_map')
-        self.blocked = self.db.table('blocked')
-    
-    def _ensure_dir(self):
-        """确保数据目录存在"""
-        dir_path = os.path.dirname(settings.data_file)
-        if dir_path and not os.path.exists(dir_path):
-            os.makedirs(dir_path, mode=0o755)
-            logger.info(f"创建数据目录: {dir_path}")
-    
-    def close(self):
-        """关闭数据库"""
-        self.db.close()
+        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+        db = TinyDB(DATA_FILE, storage=JSONStorage)
+        self.codes = db.table('codes')
+        self.users = db.table('users')
+        self.msg_map = db.table('msg_map')
+        self.blocked = db.table('blocked')
+        self.lucky_tasks = db.table('lucky_tasks')
+        self.config = db.table('config')
+
+    # ========== 配置持久化 ==========
+
+    def get_config(self, key: str):
+        C = Query()
+        r = self.config.get(C.key == key)
+        return r['value'] if r else None
+
+    def set_config(self, key: str, value):
+        C = Query()
+        self.config.upsert({'key': key, 'value': value}, C.key == key)
     
     # ========== 验证码操作 ==========
     
@@ -57,30 +51,42 @@ class DataStore:
         Code = Query()
         self.codes.upsert(code.model_dump(), Code.code == code.code)
     
-    def update_code_verified(self, code: str, nodeseek_uid: int = None):
-        """标记验证码已验证"""
+    def update_code_verified(self, code: str, forum_uid: int = None, platform: str = 'nodeseek'):
+        """标记验证码已验证，用 {platform}_uid 作为键名"""
         Code = Query()
         now = datetime.now().isoformat()
         self.codes.update({
             'verified': True,
             'verified_at': now,
-            'nodeseek_uid': nodeseek_uid
+            'platform': platform,
+            f'{platform}_uid': forum_uid,
         }, Code.code == code)
-    
+
     # ========== 用户操作 ==========
-    
+
     def get_user(self, tg_uid: str) -> Optional[UserState]:
         """获取用户状态"""
         User = Query()
         result = self.users.get(User.tg_uid == tg_uid)
         if result:
-            return UserState(**result)
+            return self._load_user(result)
         return None
-    
+
+    def _load_user(self, record: dict) -> UserState:
+        """从存储记录加载 UserState，将 {platform}_uid 映射到 forum_uid"""
+        platform = record.get('platform', 'nodeseek')
+        uid_key = f'{platform}_uid'
+        data = {**record, 'forum_uid': record.get(uid_key) or record.get('forum_uid')}
+        return UserState(**data)
+
     def save_user(self, user: UserState):
-        """保存用户状态"""
+        """保存用户状态，用 {platform}_uid 作为键名"""
         User = Query()
-        self.users.upsert(user.model_dump(), User.tg_uid == user.tg_uid)
+        data = user.model_dump()
+        # 将 forum_uid 存为 {platform}_uid，保留可读性
+        platform = user.platform
+        data[f'{platform}_uid'] = data.pop('forum_uid')
+        self.users.upsert(data, User.tg_uid == user.tg_uid)
     
     def is_verified(self, tg_uid: str) -> bool:
         """检查用户是否已验证"""
@@ -94,13 +100,14 @@ class DataStore:
                 return False
         return True
     
-    def get_user_by_nodeseek_uid(self, nodeseek_uid: int) -> Optional[UserState]:
-        """通过 NodeSeek UID 获取用户"""
+    def get_user_by_forum_uid(self, forum_uid: int, platform: str = 'nodeseek') -> Optional[UserState]:
+        """按论坛 UID + 平台查找用户"""
+        uid_key = f'{platform}_uid'
         User = Query()
-        result = self.users.get(User.nodeseek_uid == nodeseek_uid)
-        if result:
-            return UserState(**result)
-        return None
+        result = self.users.get(
+            (User[uid_key] == forum_uid) & (User.platform == platform)
+        )
+        return self._load_user(result) if result else None
     
     # ========== 黑名单操作 ==========
     
@@ -147,15 +154,73 @@ class DataStore:
         )
     
     # ========== 统计 ==========
-    
+
+    def has_pending_codes(self) -> bool:
+        """检查是否存在待验证的验证码（用于智能轮询）"""
+        Code = Query()
+        return self.codes.contains(Code.verified == False)
+
     def get_stats(self) -> Dict:
         """获取统计信息"""
         verified_count = len([u for u in self.users.all() if u.get('verified')])
         pending_codes = len([c for c in self.codes.all() if not c.get('verified')])
-        
+
         return {
             'verified_users': verified_count,
             'pending_codes': pending_codes,
             'blocked_users': len(self.blocked.all()),
             'msg_mappings': len(self.msg_map.all())
         }
+
+    # ========== 抽奖任务操作 ==========
+
+    def get_pending_lucky_tasks(self) -> List[LuckyTask]:
+        """获取所有待执行的抽奖任务"""
+        T = Query()
+        return [LuckyTask(**r) for r in self.lucky_tasks.search(T.status == 'pending')]
+
+    def get_lucky_task(self, task_id: str) -> Optional[LuckyTask]:
+        """按 ID 获取任务"""
+        T = Query()
+        r = self.lucky_tasks.get(T.id == task_id)
+        return LuckyTask(**r) if r else None
+
+    def get_lucky_task_by_post_time(self, post: str, time: int) -> Optional[LuckyTask]:
+        """按帖子 ID + 时间戳查找任务（幂等检查用）"""
+        T = Query()
+        r = self.lucky_tasks.get((T.post == post) & (T.time == time))
+        return LuckyTask(**r) if r else None
+
+    def save_lucky_task(self, task: LuckyTask):
+        """保存或更新任务"""
+        T = Query()
+        self.lucky_tasks.upsert(task.model_dump(), T.id == task.id)
+
+    def update_lucky_task_status(self, task_id: str, status: str,
+                                  winners: Optional[list] = None,
+                                  completed_at: Optional[str] = None):
+        """更新任务状态"""
+        T = Query()
+        update = {'status': status}
+        if winners is not None:
+            update['winners'] = winners
+        if completed_at is not None:
+            update['completed_at'] = completed_at
+        self.lucky_tasks.update(update, T.id == task_id)
+
+    def delete_lucky_task(self, task_id: str) -> bool:
+        """删除任务"""
+        T = Query()
+        removed = self.lucky_tasks.remove(T.id == task_id)
+        return len(removed) > 0
+
+    def list_lucky_tasks(self, page: int = 1, page_size: int = 5):
+        """分页列出任务，pending 排前"""
+        all_tasks = sorted(
+            self.lucky_tasks.all(),
+            key=lambda t: (0 if t['status'] == 'pending' else 1, t['created_at'])
+        )
+        total = len(all_tasks)
+        start = (page - 1) * page_size
+        page_tasks = [LuckyTask(**r) for r in all_tasks[start:start + page_size]]
+        return page_tasks, total

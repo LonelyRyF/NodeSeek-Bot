@@ -1,29 +1,27 @@
-"""
-配置管理 - 使用 pydantic-settings
-"""
-import logging
+# ███╗   ██╗ ██████╗ ██████╗ ███████╗███████╗███████╗███████╗██╗  ██╗     ██████╗  ██████╗ ████████╗from loguru import logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, ValidationError
-
-logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
     """应用配置"""
-    
+
     model_config = SettingsConfigDict(
         env_file='.env',
         env_file_encoding='utf-8',
-        extra='ignore'
+        extra='ignore',
+        frozen=False  # 允许运行时修改（用于自动检测 UID）
     )
-    
+
     # Telegram
     tg_bot_token: str = Field(alias='TG_BOT_TOKEN')
     tg_admin_uid: str = Field(alias='TG_ADMIN_UID')
-    
+
     # NodeSeek
     nodeseek_cookies: str = Field(alias='NODESEEK_COOKIES')
-    nodeseek_admin_uid: int = Field(alias='NODESEEK_ADMIN_UID')
+
+    # DeepFlood（可选，留空则不启用）
+    deepflood_cookies: str = Field(default='', alias='DEEPFLOOD_COOKIES')
     
     # Webhook
     webhook_url: str = Field(default='', alias='WEBHOOK_URL')
@@ -37,12 +35,12 @@ class Settings(BaseSettings):
     # 轮询设置
     poll_interval: int = Field(default=30, alias='POLL_INTERVAL')
     
-    # 数据存储
-    data_file: str = Field(default='/var/lib/tg-nodeseek-bot/data.json', alias='DATA_FILE')
-    
     # 代理设置（可选）
     proxy_host: str = Field(default='', alias='PROXY_HOST')
     proxy_port: int = Field(default=0, alias='PROXY_PORT')
+
+    # 抽奖 Webhook 认证密钥
+    lucky_auth_key: str = Field(default='', alias='LUCKY_AUTH_KEY')
     
     def validate_config(self):
         """验证配置的有效性"""
@@ -65,10 +63,6 @@ class Settings(BaseSettings):
         if not self.nodeseek_cookies or self.nodeseek_cookies.startswith('your_'):
             errors.append("NODESEEK_COOKIES 未设置或为占位符")
         
-        # 检查 NodeSeek Admin UID
-        if not self.nodeseek_admin_uid or self.nodeseek_admin_uid <= 0:
-            errors.append("NODESEEK_ADMIN_UID 未设置或无效")
-        
         # 检查轮询间隔
         if self.poll_interval <= 0:
             errors.append("POLL_INTERVAL 必须大于 0")
@@ -80,8 +74,7 @@ class Settings(BaseSettings):
         if errors:
             error_msg = "\n".join(f"  ❌ {e}" for e in errors)
             raise ValueError(f"配置验证失败:\n{error_msg}")
-        
-        logger.info("✅ 配置验证通过")
+
 
 
 def load_settings() -> Settings:

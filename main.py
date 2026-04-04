@@ -1,32 +1,33 @@
+# ███╗   ██╗ ██████╗ ██████╗ ███████╗███████╗███████╗███████╗██╗  ██╗     ██████╗  ██████╗ ████████╗
 #!/usr/bin/env python3
-"""
-Telegram Bot + NodeSeek 论坛私信验证系统
-使用 cloudscraper 绕过 Cloudflare 验证
-"""
-
 import os
 import sys
 import asyncio
-import logging
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core.bot import BotApp
+from logging_setup import setup_logging
+from loguru import logger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+setup_logging()
+
+from core.bot import BotApp
 
 
 async def main():
     """主入口"""
-    logger.info("="*50)
-    logger.info("Telegram NodeSeek 验证 Bot")
-    logger.info("="*50)
-    
+    print("="*120)
+    print("                                                                                                  ")
+    print("███╗   ██╗ ██████╗ ██████╗ ███████╗███████╗███████╗███████╗██╗  ██╗     ██████╗  ██████╗ ████████╗")
+    print("████╗  ██║██╔═══██╗██╔══██╗██╔════╝██╔════╝██╔════╝██╔════╝██║ ██╔╝     ██╔══██╗██╔═══██╗╚══██╔══╝")
+    print("██╔██╗ ██║██║   ██║██║  ██║█████╗  ███████╗█████╗  █████╗  █████╔╝█████╗██████╔╝██║   ██║   ██║   ")
+    print("██║╚██╗██║██║   ██║██║  ██║██╔══╝  ╚════██║██╔══╝  ██╔══╝  ██╔═██╗╚════╝██╔══██╗██║   ██║   ██║   ")
+    print("██║ ╚████║╚██████╔╝██████╔╝███████╗███████║███████╗███████╗██║  ██╗     ██████╔╝╚██████╔╝   ██║   ")
+    print("╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝╚══════╝╚══════╝╚═╝  ╚═╝     ╚═════╝  ╚═════╝    ╚═╝   ")
+    print("                                                                                                  ")
+    print("="*120)
+
     try:
         bot = BotApp()
         await bot.startup()

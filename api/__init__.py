@@ -1,8 +1,7 @@
-"""
-API 客户端模块
-"""
-from api.nodeseek import NodeSeekAPI
+# ███╗   ██╗ ██████╗ ██████╗ ███████╗███████╗███████╗███████╗██╗  ██╗     ██████╗  ██████╗ ████████╗
+
+from api.forum import ForumAPI
 
 __all__ = [
-    'NodeSeekAPI',
+    'ForumAPI',
 ]

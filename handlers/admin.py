@@ -1,9 +1,15 @@
-"""
-管理员消息处理器 - aiogram 3.x 版本
-"""
-import logging
-from typing import Optional, TYPE_CHECKING
+# ███╗   ██╗ ██████╗ ██████╗ ███████╗███████╗███████╗███████╗██╗  ██╗     ██████╗  ██████╗ ████████╗
+# ████╗  ██║██╔═══██╗██╔══██╗██╔════╝██╔════╝██╔════╝██╔════╝██║ ██╔╝     ██╔══██╗██╔═══██╗╚══██╔══╝
+# ██╔██╗ ██║██║   ██║██║  ██║█████╗  ███████╗█████╗  █████╗  █████╔╝█████╗██████╔╝██║   ██║   ██║
+# ██║╚██╗██║██║   ██║██║  ██║██╔══╝  ╚════██║██╔══╝  ██╔══╝  ██╔═██╗╚════╝██╔══██╗██║   ██║   ██║
+# ██║ ╚████║╚██████╔╝██████╔╝███████╗███████║███████╗███████╗██║  ██╗     ██████╔╝╚██████╔╝   ██║
+# ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝╚══════╝╚══════╝╚═╝  ╚═╝     ╚═════╝  ╚═════╝    ╚═╝
 
+import asyncio
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+
+from loguru import logger
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
@@ -11,37 +17,43 @@ from aiogram.enums import ParseMode
 from core.config import settings
 from core.store import DataStore
 
-# 延迟导入，避免循环依赖
-if TYPE_CHECKING:
-    from api.nodeseek import NodeSeekAPI
-
-logger = logging.getLogger(__name__)
-
 
 class AdminHandlers:
     """管理员消息处理器"""
-    
-    def __init__(self, store: DataStore, bot: Bot):
+
+    def __init__(self, store: DataStore, bot: Bot, apis: dict, lucky_engine=None):
         self.store = store
         self.bot = bot
-        # 延迟导入
-        from api.nodeseek import NodeSeekAPI
-        self.ns = NodeSeekAPI()
+        self.apis = apis
+        self.lucky_engine = lucky_engine
     
     def register(self, dp: Dispatcher):
         """注册处理器"""
+        admin_filter = F.chat.id == int(settings.tg_admin_uid)
+
         # 指令处理器
-        dp.message.register(self.cmd_block, Command("block"), F.chat.id == int(settings.tg_admin_uid))
-        dp.message.register(self.cmd_unblock, Command("unblock"), F.chat.id == int(settings.tg_admin_uid))
-        dp.message.register(self.cmd_clear_ver, Command("clear_ver"), F.chat.id == int(settings.tg_admin_uid))
-        dp.message.register(self.cmd_stats, Command("stats"), F.chat.id == int(settings.tg_admin_uid))
-        dp.message.register(self.cmd_test_nodeseek, Command("test_nodeseek"), F.chat.id == int(settings.tg_admin_uid))
-        
+        dp.message.register(self.cmd_block, Command("block"), admin_filter)
+        dp.message.register(self.cmd_unblock, Command("unblock"), admin_filter)
+        dp.message.register(self.cmd_clear_ver, Command("clear_ver"), admin_filter)
+        dp.message.register(self.cmd_stats, Command("stats"), admin_filter)
+        dp.message.register(self.cmd_checkin, Command("checkin"), admin_filter)
+        dp.message.register(self.cmd_list_lucky, Command("list_lucky"), admin_filter)
+        dp.message.register(self.cmd_view_lucky, Command("view_lucky"), admin_filter)
+        dp.message.register(self.cmd_del_lucky, Command("del_lucky"), admin_filter)
+        dp.message.register(self.cmd_reset_lucky, Command("reset_lucky"), admin_filter)
+
+        # 回调处理器
+        dp.callback_query.register(
+            self.cb_lucky_page,
+            F.data.startswith("lucky_page:"),
+            F.from_user.id == int(settings.tg_admin_uid)
+        )
+
         # 回复消息处理器（非指令的管理员消息）
-        dp.message.register(self.handle_reply, F.reply_to_message, F.chat.id == int(settings.tg_admin_uid))
-        
+        dp.message.register(self.handle_reply, F.reply_to_message, admin_filter)
+
         # 帮助信息（纯文本指令）
-        dp.message.register(self.cmd_help, F.chat.id == int(settings.tg_admin_uid))
+        dp.message.register(self.cmd_help, admin_filter)
     
     async def cmd_block(self, message: types.Message):
         """拉黑用户"""
@@ -82,54 +94,19 @@ class AdminHandlers:
     async def cmd_stats(self, message: types.Message):
         """显示统计信息"""
         stats = self.store.get_stats()
-        
-        stats_text = f"""📊 统计信息
+        await message.answer(
+            f"📊 统计信息\n\n"
+            f"已验证用户: {stats['verified_users']}\n"
+            f"待验证验证码: {stats['pending_codes']}\n"
+            f"黑名单用户: {stats['blocked_users']}\n"
+            f"消息映射缓存: {stats['msg_mappings']}"
+        )
 
-已验证用户: {stats['verified_users']}
-待验证验证码: {stats['pending_codes']}
-黑名单用户: {stats['blocked_users']}
-消息映射缓存: {stats['msg_mappings']}"""
-        
-        await message.answer(stats_text)
-    
-    async def cmd_test_nodeseek(self, message: types.Message):
-        """测试 NodeSeek API"""
-        await message.answer("🔍 正在测试 NodeSeek API...")
-        
-        try:
-            result = self.ns._request('GET', '/api/notification/message/list')
-            
-            # 构建详细的响应信息
-            response_text = """🔍 NodeSeek API 测试结果
-
-端点: /api/notification/message/list
-方法: GET
-
-响应状态:
-"""
-            
-            if result.get('success'):
-                messages = result.get('msgArray', [])
-                response_text += f"✅ 成功 (200 OK)\n\n获取到 {len(messages)} 条私信"
-            else:
-                error = result.get('error', '未知错误')
-                response_text += f"❌ 失败\n\n错误: {error}"
-            
-            # 添加原始响应
-            response_text += f"\n\n原始响应:\n{str(result)[:300]}"
-            
-            await message.answer(response_text)
-        except Exception as e:
-            await message.answer(
-                f"❌ NodeSeek API 测试失败\n\n"
-                f"错误: {e}"
-            )
-    
     async def handle_reply(self, message: types.Message):
         """回复访客消息"""
         reply = message.reply_to_message
         guest_id = self.store.get_msg_mapping(reply.message_id)
-        
+
         if guest_id:
             try:
                 await message.copy_to(guest_id)
@@ -151,14 +128,147 @@ class AdminHandlers:
 /unblock - 回复消息或 /unblock 123456 解封
 /clear_ver - 回复消息或 /clear_ver 123456 重置验证
 /stats - 查看统计信息
-/test_nodeseek - 测试 NodeSeek API
 
-<b>说明</b>
-• 拉黑后用户无法发送消息
-• 重置验证后用户需要重新验证
-• 消息映射缓存长期有效'''
-        
+<b>签到</b>
+/checkin [random] - 签到（random=随机积分）
+
+<b>抽奖</b>
+/list_lucky [page] - 查看抽奖任务列表
+/view_lucky &lt;id&gt; - 查看任务详情
+/del_lucky &lt;id&gt; - 删除任务
+/reset_lucky &lt;id&gt; - 重置任务为待执行'''
+
         await message.answer(help_text, parse_mode=ParseMode.HTML)
+
+    async def cmd_checkin(self, message: types.Message):
+        """签到所有已配置平台"""
+        args = message.text.split()
+        random_mode = len(args) > 1 and args[1].lower() in ('random', 'true')
+
+        await message.answer("⏳ 正在签到...")
+        loop = asyncio.get_event_loop()
+
+        async def do_checkin(platform, api):
+            try:
+                result = await loop.run_in_executor(None, api.checkin, random_mode)
+                ok = result.get('success') is True
+                return f"{'✅' if ok else '❌'} [{platform}] {result.get('message', str(result))}"
+            except Exception as e:
+                return f"❌ [{platform}] 请求失败: {e}"
+
+        results = await asyncio.gather(*[do_checkin(p, a) for p, a in self.apis.items()])
+        await message.answer('\n'.join(results))
+
+    async def cmd_list_lucky(self, message: types.Message):
+        """列出抽奖任务"""
+        args = message.text.split()
+        page = int(args[1]) if len(args) > 1 and args[1].isdigit() else 1
+        await self._send_lucky_list(message, page)
+
+    async def _send_lucky_list(self, message: types.Message, page: int):
+        tasks, total = self.store.list_lucky_tasks(page=page, page_size=5)
+        total_pages = max(1, (total + 4) // 5)
+
+        if not tasks:
+            await message.answer("暂无抽奖任务。")
+            return
+
+        lines = [f"📋 抽奖任务 ({page}/{total_pages})\n"]
+        for t in tasks:
+            status_icon = {'pending': '⏳', 'completed': '✅', 'failed': '❌'}.get(t.status, '❓')
+            dt = datetime.fromtimestamp(t.time / 1000, tz=timezone(timedelta(hours=8)))
+            time_str = dt.strftime('%m-%d %H:%M')
+            lines.append(f"{status_icon} [{t.id[:8]}] {t.title[:20]} ({time_str})")
+
+        keyboard = []
+        nav = []
+        if page > 1:
+            nav.append(types.InlineKeyboardButton(text="◀️", callback_data=f"lucky_page:{page-1}"))
+        if page < total_pages:
+            nav.append(types.InlineKeyboardButton(text="▶️", callback_data=f"lucky_page:{page+1}"))
+        if nav:
+            keyboard.append(nav)
+
+        markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+        await message.answer('\n'.join(lines), reply_markup=markup)
+
+    async def cb_lucky_page(self, callback: types.CallbackQuery):
+        page = int(callback.data.split(':')[1])
+        await callback.answer()
+        await self._send_lucky_list(callback.message, page)
+
+    async def cmd_view_lucky(self, message: types.Message):
+        """查看任务详情"""
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("用法: /view_lucky <id前缀>")
+            return
+
+        task_id_prefix = args[1]
+        task = self.store.get_lucky_task(task_id_prefix)
+        if not task:
+            # 尝试前缀匹配
+            all_tasks, _ = self.store.list_lucky_tasks(page=1, page_size=1000)
+            matches = [t for t in all_tasks if t.id.startswith(task_id_prefix)]
+            task = matches[0] if len(matches) == 1 else None
+
+        if not task:
+            await message.answer("未找到任务。")
+            return
+
+        dt = datetime.fromtimestamp(task.time / 1000, tz=timezone(timedelta(hours=8)))
+        lines = [
+            f"📌 {task.title}",
+            f"ID: `{task.id}`",
+            f"帖子: {task.post}",
+            f"开奖时间: {dt.strftime('%Y-%m-%d %H:%M:%S CST')}",
+            f"中奖人数: {task.count}",
+            f"起始楼层: {task.start}",
+            f"允许重复: {'是' if task.duplicate else '否'}",
+            f"状态: {task.status}",
+        ]
+        if task.winners:
+            lines.append("\n🏆 中奖名单:")
+            for i, w in enumerate(task.winners):
+                lines.append(f"  {i+1}. {w['name']} ({w['floor']} 楼)")
+
+        await message.answer('\n'.join(lines), parse_mode=ParseMode.MARKDOWN)
+
+    async def cmd_del_lucky(self, message: types.Message):
+        """删除任务"""
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("用法: /del_lucky <id前缀>")
+            return
+        ok = self.store.delete_lucky_task(args[1])
+        if not ok:
+            # 前缀匹配
+            all_tasks, _ = self.store.list_lucky_tasks(page=1, page_size=1000)
+            matches = [t for t in all_tasks if t.id.startswith(args[1])]
+            if len(matches) == 1:
+                ok = self.store.delete_lucky_task(matches[0].id)
+        await message.answer("✅ 已删除。" if ok else "❌ 未找到任务。")
+
+    async def cmd_reset_lucky(self, message: types.Message):
+        """重置任务为 pending"""
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("用法: /reset_lucky <id前缀>")
+            return
+
+        task_id = args[1]
+        task = self.store.get_lucky_task(task_id)
+        if not task:
+            all_tasks, _ = self.store.list_lucky_tasks(page=1, page_size=1000)
+            matches = [t for t in all_tasks if t.id.startswith(task_id)]
+            task = matches[0] if len(matches) == 1 else None
+
+        if not task:
+            await message.answer("❌ 未找到任务。")
+            return
+
+        self.store.update_lucky_task_status(task.id, status='pending', winners=None, completed_at=None)
+        await message.answer(f"🔄 任务 {task.id[:8]} 已重置为待执行。")
     
     def _get_target_id(self, text: str, reply: Optional[types.Message]) -> Optional[str]:
         """从回复或参数获取目标 ID"""
@@ -176,7 +286,7 @@ class AdminHandlers:
         return None
 
 
-def setup_admin_handlers(dp: Dispatcher, store: DataStore, bot: Bot):
+def setup_admin_handlers(dp: Dispatcher, store: DataStore, bot: Bot, apis: dict, lucky_engine=None):
     """设置管理员处理器"""
-    handlers = AdminHandlers(store, bot)
+    handlers = AdminHandlers(store, bot, apis, lucky_engine)
     handlers.register(dp)
