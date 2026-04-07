@@ -11,7 +11,13 @@ from loguru import logger
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import ReplyParameters
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    MenuButtonCommands,
+    ReplyParameters,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from core.config import settings
@@ -21,7 +27,8 @@ from core.lucky_engine import LuckyEngine
 from api.forum import ForumAPI
 from services.forum_poller import ForumPoller
 from services.lucky_scheduler import LuckyScheduler
-from handlers.admin import setup_admin_handlers
+from services.rss_poller import RSSPoller
+from handlers.admin import setup_admin_handlers, AdminHandlers
 from handlers.guest import setup_guest_handlers
 
 
@@ -52,6 +59,8 @@ class BotApp:
 
         self.lucky_engine = LuckyEngine(self.apis, self.store, self.bot, settings.tg_admin_uid)
         self.lucky_scheduler = LuckyScheduler(self.lucky_engine, self.store)
+        
+        self.rss_poller = RSSPoller(self.store, self.bot, settings.proxy_host, settings.proxy_port)
 
         self.scheduler = AsyncIOScheduler()
         self._webhook_secret = None
@@ -60,15 +69,29 @@ class BotApp:
     
     def _setup_handlers(self):
         """设置消息处理器"""
-        setup_admin_handlers(self.dp, self.store, self.bot, self.apis, self.lucky_engine)
+        setup_admin_handlers(self.dp, self.store, self.bot, self.apis, self.lucky_engine, self.rss_poller)
         setup_guest_handlers(self.dp, self.store, self.code_mgr, self.bot, self.pollers)
     
+    async def _setup_bot_commands(self):
+        """配置 Telegram 命令菜单与聊天菜单按钮"""
+        default_commands = [
+            BotCommand(command="start", description="开始使用"),
+            BotCommand(command="help", description="查看帮助"),
+        ]
+        await self.bot.set_my_commands(default_commands)
+        await self.bot.set_my_commands(default_commands, scope=BotCommandScopeAllPrivateChats())
+
+        admin_scope = BotCommandScopeChat(chat_id=int(settings.tg_admin_uid))
+        await self.bot.set_my_commands(AdminHandlers.COMMANDS, scope=admin_scope)
+        await self.bot.set_chat_menu_button(menu_button=MenuButtonCommands(), chat_id=int(settings.tg_admin_uid))
+
     async def startup(self):
         """启动初始化"""
         logger.info("正在启动 Bot...")
 
         # 验证 cookies 并自动检测各平台 UID
         loop = asyncio.get_event_loop()
+        await self._setup_bot_commands()
         for platform, api in self.apis.items():
             valid = await loop.run_in_executor(None, api.check_cookies)
             if not valid:
@@ -107,7 +130,7 @@ class BotApp:
             self.scheduler.add_job(
                 self._cleanup_expired,
                 'interval',
-                hours=1,
+                minutes=1,
                 id='cleanup'
             )
             self.scheduler.add_job(
@@ -115,6 +138,12 @@ class BotApp:
                 'interval',
                 minutes=1,
                 id='lucky_tick'
+            )
+            self.scheduler.add_job(
+                self.rss_poller.poll,
+                'interval',
+                seconds=settings.rss_poll_interval,
+                id='rss_poll'
             )
             self.scheduler.start()
         

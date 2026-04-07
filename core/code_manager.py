@@ -85,13 +85,12 @@ class CodeManager:
 
         # 更新用户状态
         now = datetime.now()
-        expires = now + timedelta(seconds=settings.verification_ttl)
 
         user = UserState(
             tg_uid=vcode.tg_uid,
             verified=True,
             verified_at=now.isoformat(),
-            expires_at=expires.isoformat(),
+            expires_at=None,
             forum_uid=forum_uid,
             platform=platform,
         )
@@ -110,7 +109,7 @@ class CodeManager:
             if item.get('verified'):
                 continue
             created = datetime.fromisoformat(item['created_at'])
-            if now - created > timedelta(hours=24):
+            if now - created > timedelta(minutes=3):
                 expired.append(item['code'])
         
         for code in expired:

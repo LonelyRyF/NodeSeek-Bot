@@ -14,6 +14,8 @@ from datetime import date
 
 from loguru import logger
 
+from core.config import settings
+
 default_format: str = (
     "<g>{time:MM-DD HH:mm:ss}</g> "
     "[<lvl>{level}</lvl>] "
@@ -22,7 +24,7 @@ default_format: str = (
 )
 
 file_format: str = (
-    "{time:MM-DD HH:mm:ss} [{level}] {name} | {message}\n{exception}"
+    "{time:MM-DD HH:mm:ss} [{level}] {name} | {message}"
 )
 
 
@@ -43,7 +45,7 @@ class LoguruHandler(logging.Handler):
         )
 
 
-def setup_logging():
+def init_logger():
     """初始化 loguru 日志系统"""
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
@@ -69,14 +71,14 @@ def setup_logging():
 
     logger.add(
         sys.stdout,
-        level="INFO",
+        level=settings.log_level.upper(),
         diagnose=False,
         format=default_format,
     )
 
     logger.add(
         str(latest),
-        level="DEBUG",
+        level=settings.log_level.upper(),
         diagnose=False,
         format=file_format,
         encoding="utf-8",

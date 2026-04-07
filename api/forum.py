@@ -10,9 +10,9 @@ import json
 from typing import List, Dict, Any, Optional
 
 from loguru import logger
-from curl_cffi import requests
 
 from core.models import ForumMessage
+from api.http_client import HTTPClient
 
 
 class ForumAPI:
@@ -22,26 +22,20 @@ class ForumAPI:
                  proxy_host: str = '', proxy_port: int = 0):
         self.platform = platform
         self.BASE_URL = base_url.rstrip('/')
-        self.session = requests.Session()
+        self.http_client = HTTPClient(timeout_seconds=15, proxy_host=proxy_host, proxy_port=proxy_port)
 
         self._parse_cookies(cookies)
 
         self.headers = {
             'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
             'Origin': self.BASE_URL,
             'Referer': self.BASE_URL + '/',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-origin',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
         }
 
-        self.proxies = None
         if proxy_host and proxy_port:
-            self.proxies = {
-                'http': f'socks5://{proxy_host}:{proxy_port}',
-                'https': f'socks5://{proxy_host}:{proxy_port}',
-            }
             logger.info(f"[{platform}] 使用代理: {proxy_host}:{proxy_port}")
         else:
             logger.info(f"[{platform}] 直连")
@@ -59,16 +53,8 @@ class ForumAPI:
         url = f"{self.BASE_URL}{endpoint}"
         response = None
         try:
-            request_kwargs = {
-                'headers': self.headers,
-                'cookies': override_cookies if override_cookies is not None else self.cookies,
-                'impersonate': 'chrome142',
-                **kwargs
-            }
-            if self.proxies:
-                request_kwargs['proxies'] = self.proxies
-
-            response = self.session.request(method, url, **request_kwargs)
+            cookies = override_cookies if override_cookies is not None else self.cookies
+            response = self.http_client.request(method, url, headers=self.headers, cookies=cookies, **kwargs)
             try:
                 data = response.json()
             except Exception:

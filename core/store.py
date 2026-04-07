@@ -8,7 +8,7 @@
 import os
 from loguru import logger
 from typing import Optional, Dict, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 from tinydb import TinyDB, Query
 from tinydb.storages import JSONStorage
@@ -24,13 +24,22 @@ class DataStore:
 
     def __init__(self):
         os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-        db = TinyDB(DATA_FILE, storage=JSONStorage)
-        self.codes = db.table('codes')
-        self.users = db.table('users')
-        self.msg_map = db.table('msg_map')
-        self.blocked = db.table('blocked')
-        self.lucky_tasks = db.table('lucky_tasks')
-        self.config = db.table('config')
+        self._db = TinyDB(DATA_FILE, storage=JSONStorage, indent=2)
+        self.codes = self._db.table('codes')
+        self.users = self._db.table('users')
+        self.msg_map = self._db.table('msg_map')
+        self.blocked = self._db.table('blocked')
+        self.lucky_tasks = self._db.table('lucky_tasks')
+        self.config = self._db.table('config')
+        self.rss_config = self._db.table('rss_config')
+        self.rss_keywords = self._db.table('rss_keywords')
+        self.rss_history = self._db.table('rss_history')
+    
+    def close(self):
+        """关闭数据库连接"""
+        if self._db is not None:
+            self._db.close()
+            self._db = None
 
     # ========== 配置持久化 ==========
 
@@ -42,6 +51,185 @@ class DataStore:
     def set_config(self, key: str, value):
         C = Query()
         self.config.upsert({'key': key, 'value': value}, C.key == key)
+
+    def get_checkin_random_enabled(self, platform: Optional[str] = None) -> bool:
+        key = self._checkin_random_config_key(platform)
+        value = self.get_config(key)
+        if value is None and platform is not None:
+            value = self.get_config(self._checkin_random_config_key(None))
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    def set_checkin_random_enabled(self, enabled: bool, platform: Optional[str] = None):
+        key = self._checkin_random_config_key(platform)
+        self.set_config(key, bool(enabled))
+
+    def record_checkin_result(self, platform: str, success: bool, message: Optional[str] = None):
+        key = self._checkin_status_config_key(platform)
+        payload = {
+            'success': bool(success),
+            'message': message,
+            'checked_at': datetime.now(timezone.utc).isoformat(),
+        }
+        self.set_config(key, payload)
+
+    def get_checkin_status(self, platform: str) -> Optional[Dict]:
+        value = self.get_config(self._checkin_status_config_key(platform))
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def is_checkin_done_today(record: Optional[Dict]) -> bool:
+        if not record or not record.get('success') or not record.get('checked_at'):
+            return False
+        try:
+            checked_at = datetime.fromisoformat(record['checked_at'])
+        except (TypeError, ValueError):
+            return False
+        return checked_at.astimezone(timezone.utc).date() == datetime.now(timezone.utc).date()
+
+    @staticmethod
+    def _checkin_status_config_key(platform: str) -> str:
+        normalized = platform.strip().lower()
+        return f'checkin_status:{normalized}'
+
+    @staticmethod
+    def _checkin_random_config_key(platform: Optional[str]) -> str:
+        normalized = (platform or '').strip().lower()
+        if normalized:
+            return f'checkin_random_enabled:{normalized}'
+        return 'checkin_random_enabled'
+
+    # ========== RSS 配置 ==========
+
+    def get_rss_config(self) -> Dict:
+        record = self.rss_config.get(doc_id=1)
+        if record:
+            return record
+
+        now = datetime.now(timezone.utc).isoformat()
+        default_config = {
+            'enabled': False,
+            'initialized': False,
+            'categories': [],
+            'last_poll_at': None,
+            'created_at': now,
+            'updated_at': now,
+        }
+        self.rss_config.upsert({'_id': 1, **default_config}, Query()._id == 1)
+        return self.rss_config.get(Query()._id == 1) or {'_id': 1, **default_config}
+
+    def update_rss_config(self, **kwargs) -> Dict:
+        current = self.get_rss_config()
+        updated = {
+            **current,
+            **kwargs,
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+        }
+        self.rss_config.upsert({'_id': 1, **updated}, Query()._id == 1)
+        return self.rss_config.get(Query()._id == 1) or updated
+
+    def reset_rss_initialized(self) -> Dict:
+        return self.update_rss_config(initialized=False)
+
+    def list_rss_keywords(self, enabled_only: bool = False) -> List[Dict]:
+        keywords = sorted(self.rss_keywords.all(), key=lambda item: item.get('created_at', ''))
+        if enabled_only:
+            keywords = [item for item in keywords if item.get('enabled', True)]
+        return keywords
+
+    def get_rss_keyword(self, keyword: str) -> Optional[Dict]:
+        Keyword = Query()
+        return self.rss_keywords.get(Keyword.keyword == keyword.strip().lower())
+
+    def add_rss_keyword(self, keyword: str) -> Dict:
+        cleaned = keyword.strip().lower()
+        if not cleaned:
+            raise ValueError('keyword 不能为空')
+
+        existing = self.get_rss_keyword(cleaned)
+        if existing:
+            return existing
+
+        now = datetime.now(timezone.utc).isoformat()
+        record = {
+            'keyword': cleaned,
+            'enabled': True,
+            'hit_count': 0,
+            'created_at': now,
+            'last_hit_at': None,
+        }
+        self.rss_keywords.insert(record)
+        return record
+
+    def delete_rss_keyword(self, keyword: str) -> bool:
+        Keyword = Query()
+        removed = self.rss_keywords.remove(Keyword.keyword == keyword.strip().lower())
+        return len(removed) > 0
+
+    def set_rss_keyword_enabled(self, keyword: str, enabled: bool) -> bool:
+        Keyword = Query()
+        updated = self.rss_keywords.update(
+            {'enabled': enabled},
+            Keyword.keyword == keyword.strip().lower()
+        )
+        return len(updated) > 0
+
+    def bump_rss_keyword_hits(self, keywords: List[str]):
+        Keyword = Query()
+        now = datetime.now(timezone.utc).isoformat()
+        for keyword in keywords:
+            record = self.get_rss_keyword(keyword)
+            if not record:
+                continue
+            self.rss_keywords.update(
+                {
+                    'hit_count': int(record.get('hit_count', 0)) + 1,
+                    'last_hit_at': now,
+                },
+                Keyword.keyword == keyword
+            )
+
+    def is_rss_item_delivered(self, item_key: str) -> bool:
+        History = Query()
+        return self.rss_history.contains(History.item_key == item_key)
+
+    def add_rss_history(self, item_key: str, title: str, link: str,
+                        category_slug: Optional[str], matched_keywords: List[str]) -> Dict:
+        History = Query()
+        now = datetime.now(timezone.utc).isoformat()
+        record = {
+            'item_key': item_key,
+            'title': title,
+            'link': link,
+            'category_slug': category_slug,
+            'matched_keywords': matched_keywords,
+            'delivered_at': now,
+        }
+        self.rss_history.upsert(record, History.item_key == item_key)
+        # 导入配置获取历史上限
+        from core.config import settings
+        self._trim_rss_history(limit=settings.rss_history_limit)
+        return record
+
+    def list_rss_history(self, limit: int = 10) -> List[Dict]:
+        items = sorted(
+            self.rss_history.all(),
+            key=lambda item: item.get('delivered_at', ''),
+            reverse=True,
+        )
+        return items[:limit]
+
+    def _trim_rss_history(self, limit: int = 200):
+        items = sorted(
+            self.rss_history.all(),
+            key=lambda item: item.get('delivered_at', ''),
+            reverse=True,
+        )
+        for stale in items[limit:]:
+            self.rss_history.remove(doc_ids=[stale.doc_id])
     
     # ========== 验证码操作 ==========
     

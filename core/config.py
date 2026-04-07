@@ -36,15 +36,25 @@ class Settings(BaseSettings):
     host: str = Field(default='0.0.0.0', alias='HOST')
     
     # 验证设置
-    verification_ttl: int = Field(default=60*60*24*30, alias='VERIFICATION_TTL')  # 30天
     code_length: int = Field(default=6, alias='CODE_LENGTH')
     
     # 轮询设置
     poll_interval: int = Field(default=30, alias='POLL_INTERVAL')
+
+    # RSS 设置
+    rss_url: str = 'https://rss.nodeseek.com'
+    rss_poll_interval: int = Field(default=60, alias='RSS_POLL_INTERVAL')
+    rss_http_timeout: int = Field(default=15, alias='RSS_HTTP_TIMEOUT')
+    rss_max_entries: int = Field(default=50, alias='RSS_MAX_ENTRIES')
+    rss_disable_web_page_preview: bool = Field(default=True, alias='RSS_DISABLE_WEB_PAGE_PREVIEW')
+    rss_history_limit: int = Field(default=200, alias='RSS_HISTORY_LIMIT')
     
     # 代理设置（可选）
     proxy_host: str = Field(default='', alias='PROXY_HOST')
     proxy_port: int = Field(default=0, alias='PROXY_PORT')
+
+    # 日志设置
+    log_level: str = Field(default='INFO', alias='LOG_LEVEL')
 
     # 抽奖 Webhook 认证密钥
     lucky_auth_key: str = Field(default='', alias='LUCKY_AUTH_KEY')
@@ -52,6 +62,7 @@ class Settings(BaseSettings):
     def validate_config(self):
         """验证配置的有效性"""
         errors = []
+        valid_log_levels = {'TRACE', 'DEBUG', 'INFO', 'SUCCESS', 'WARNING', 'ERROR', 'CRITICAL'}
         
         # 检查 Telegram Token
         if not self.tg_bot_token or self.tg_bot_token.startswith('your_'):
@@ -73,6 +84,21 @@ class Settings(BaseSettings):
         # 检查轮询间隔
         if self.poll_interval <= 0:
             errors.append("POLL_INTERVAL 必须大于 0")
+
+        if self.rss_poll_interval <= 0:
+            errors.append("RSS_POLL_INTERVAL 必须大于 0")
+
+        if self.rss_http_timeout <= 0:
+            errors.append("RSS_HTTP_TIMEOUT 必须大于 0")
+
+        if self.rss_max_entries <= 0:
+            errors.append("RSS_MAX_ENTRIES 必须大于 0")
+
+        if self.rss_history_limit <= 0:
+            errors.append("RSS_HISTORY_LIMIT 必须大于 0")
+
+        if self.log_level.upper() not in valid_log_levels:
+            errors.append("LOG_LEVEL 必须是 TRACE/DEBUG/INFO/SUCCESS/WARNING/ERROR/CRITICAL 之一")
         
         # 检查验证码长度
         if self.code_length < 4 or self.code_length > 20:
