@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # 轮询设置
     poll_interval: int = Field(default=30, alias='POLL_INTERVAL')
 
+    # 自动签到设置
+    auto_checkin_hour: int = Field(default=0, alias='AUTO_CHECKIN_HOUR')
+    auto_checkin_minute: int = Field(default=5, alias='AUTO_CHECKIN_MINUTE')
+
     # RSS 设置
     rss_url: str = 'https://rss.nodeseek.com'
     rss_poll_interval: int = Field(default=60, alias='RSS_POLL_INTERVAL')
@@ -84,6 +88,12 @@ class Settings(BaseSettings):
         # 检查轮询间隔
         if self.poll_interval <= 0:
             errors.append("POLL_INTERVAL 必须大于 0")
+
+        if not 0 <= self.auto_checkin_hour <= 23:
+            errors.append("AUTO_CHECKIN_HOUR 必须在 0-23 之间")
+
+        if not 0 <= self.auto_checkin_minute <= 59:
+            errors.append("AUTO_CHECKIN_MINUTE 必须在 0-59 之间")
 
         if self.rss_poll_interval <= 0:
             errors.append("RSS_POLL_INTERVAL 必须大于 0")

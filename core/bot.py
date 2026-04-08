@@ -6,6 +6,7 @@
 # ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝╚══════╝╚══════╝╚═╝  ╚═╝     ╚═════╝  ╚═════╝    ╚═╝
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 from aiogram import Bot, Dispatcher, types, F
@@ -145,6 +146,13 @@ class BotApp:
                 seconds=settings.rss_poll_interval,
                 id='rss_poll'
             )
+            self.scheduler.add_job(
+                self._auto_checkin,
+                'cron',
+                hour=settings.auto_checkin_hour,
+                minute=settings.auto_checkin_minute,
+                id='auto_checkin'
+            )
             self.scheduler.start()
         
         logger.info("Bot 启动完成")
@@ -167,6 +175,32 @@ class BotApp:
             self.code_mgr.cleanup_expired()
         except Exception as e:
             logger.error(f"清理异常: {e}")
+
+    async def _auto_checkin(self):
+        """每日自动签到（北京时间）"""
+        if not self.store.get_checkin_auto_enabled():
+            return
+
+        now_cst = datetime.now(timezone(timedelta(hours=8)))
+        logger.info(f"开始执行自动签到任务: {now_cst.strftime('%Y-%m-%d %H:%M:%S CST')}")
+        loop = asyncio.get_event_loop()
+
+        for platform, api in self.apis.items():
+            status_record = self.store.get_checkin_status(platform)
+            if self.store.is_checkin_done_today(status_record):
+                logger.info(f"[{platform}] 今日已签到，跳过自动签到")
+                continue
+
+            random_mode = self.store.get_checkin_random_enabled(platform)
+            try:
+                result = await loop.run_in_executor(None, api.checkin, random_mode)
+                ok = result.get('success') is True
+                result_message = result.get('message', str(result))
+                self.store.record_checkin_result(platform, ok, result_message)
+                logger.info(f"[{platform}] 自动签到{'成功' if ok else '失败'}: {result_message}")
+            except Exception as e:
+                self.store.record_checkin_result(platform, False, str(e))
+                logger.error(f"[{platform}] 自动签到异常: {e}")
     
     def _generate_secret(self) -> str:
         """生成 webhook secret（单例）"""

@@ -190,8 +190,7 @@ class AdminHandlers:
             [InlineKeyboardButton(text="NodeSeek 签到", callback_data="checkin:run:nodeseek")],
             [InlineKeyboardButton(text="DeepFlood 签到", callback_data="checkin:run:deepflood")],
             [InlineKeyboardButton(text="查看状态", callback_data="checkin:status")],
-            [InlineKeyboardButton(text="启用随机鸡腿", callback_data="checkin:switch:on")],
-            [InlineKeyboardButton(text="禁用随机鸡腿", callback_data="checkin:switch:off")],
+            [InlineKeyboardButton(text="签到设置", callback_data="checkin:settings")],
             [InlineKeyboardButton(text="返回主菜单", callback_data="admin:start")],
         ])
         text = """签到管理
@@ -201,8 +200,29 @@ class AdminHandlers:
 • NodeSeek 签到 - 仅在 NodeSeek 平台执行签到
 • DeepFlood 签到 - 仅在 DeepFlood 平台执行签到
 • 查看状态 - 查看各平台的随机鸡腿开关状态及今日是否已签到
-• 随机鸡腿开关 - 切换签到时是否随机获得鸡腿数"""
+• 签到设置 - 打开签到相关设置子菜单"""
         
+        await self._render_message(message, text, reply_markup=keyboard)
+
+    async def _send_checkin_settings_panel(self, message: types.Message):
+        auto_enabled = self.store.get_checkin_auto_enabled()
+        auto_text = '已启用' if auto_enabled else '已禁用'
+        random_enabled = any(self.store.get_checkin_random_enabled(platform) for platform in self.apis.keys())
+        random_text = '已启用' if random_enabled else '已禁用'
+        auto_button_text = "关闭自动签到" if auto_enabled else "开启自动签到"
+        random_button_text = "关闭随机鸡腿" if random_enabled else "开启随机鸡腿"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=auto_button_text, callback_data="checkin:auto:toggle")],
+            [InlineKeyboardButton(text=random_button_text, callback_data="checkin:switch:toggle")],
+            [InlineKeyboardButton(text="返回签到管理", callback_data="admin:checkin")],
+        ])
+        text = f"""签到设置
+
+功能说明：
+• 自动签到：{auto_text}（每天北京时间 00:05 执行）
+• 随机鸡腿：{random_text}
+• 点击按钮可直接切换对应状态"""
+
         await self._render_message(message, text, reply_markup=keyboard)
 
     async def _send_lottery_panel(self, message: types.Message):
@@ -226,21 +246,24 @@ class AdminHandlers:
         await self._render_message(message, text, reply_markup=keyboard)
 
     async def _send_rss_panel(self, message: types.Message):
+        config = self.store.get_rss_config()
+        enabled = bool(config.get('enabled'))
+        enabled_text = '已启用' if enabled else '已禁用'
+        toggle_text = '关闭自动轮询' if enabled else '开启自动轮询'
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="查看状态", callback_data="rss:status")],
-            [InlineKeyboardButton(text="启用自动轮询", callback_data="rss:on"),
-             InlineKeyboardButton(text="禁用自动轮询", callback_data="rss:off")],
+            [InlineKeyboardButton(text=toggle_text, callback_data="rss:toggle")],
             [InlineKeyboardButton(text="手动轮询一次", callback_data="rss:poll")],
             [InlineKeyboardButton(text="查看推送历史", callback_data="rss:history:10")],
             [InlineKeyboardButton(text="版块筛选", callback_data="rss:scope_panel")],
             [InlineKeyboardButton(text="关键词管理", callback_data="rss:keyword_panel")],
             [InlineKeyboardButton(text="返回主菜单", callback_data="admin:start")],
         ])
-        text = """RSS 订阅管理
+        text = f"""RSS 订阅管理
 
 功能说明：
-• 查看状态 - 查看 RSS 功能当前的启用状态和订阅配置
-• 启用/禁用自动轮询 - 切换是否定期自动拉取 RSS 内容
+• 自动轮询：{enabled_text}
+• 点击“{toggle_text}”可直接切换 RSS 自动轮询状态
 • 手动轮询一次 - 立即执行一次 RSS 源的拉取和内容检查
 • 查看推送历史 - 显示已推送给管理员的历史记录
 • 版块筛选 - 配置推送内容的版块过滤规则
@@ -503,7 +526,11 @@ class AdminHandlers:
 
     async def _send_checkin_status(self, message: types.Message, *, callback_result: bool = False):
         """显示签到状态"""
-        lines = ["签到状态统计\n"]
+        text = f"""签到状态统计
+
+自动签到：{'启用' if self.store.get_checkin_auto_enabled() else '禁用'}（每天北京时间 00:05 执行）
+"""
+        lines = [text]
         for platform in self.apis.keys():
             random_enabled = self.store.get_checkin_random_enabled(platform)
             status_record = self.store.get_checkin_status(platform)
@@ -526,11 +553,23 @@ class AdminHandlers:
         else:
             await self._render_message(message, text)
 
-    async def _switch_checkin_random(self, message: types.Message, args: list[str], *, callback_result: bool = False):
+    async def _switch_checkin_auto(self, message: types.Message, enabled: Optional[bool] = None, *, callback_result: bool = False):
+        """切换自动签到"""
+        if enabled is None:
+            enabled = not self.store.get_checkin_auto_enabled()
+        self.store.set_checkin_auto_enabled(enabled)
+        if callback_result:
+            await self._send_checkin_settings_panel(message)
+        else:
+            status = '启用' if enabled else '禁用'
+            text = f"已{status}自动签到，将于每天北京时间 00:05 执行。"
+            await message.answer(text)
+
+    async def _switch_checkin_random(self, message: types.Message, args: Optional[list[str]] = None, *, callback_result: bool = False):
         """切换签到随机模式"""
         if not args:
-            await message.answer("用法：/checkin switch on|off [平台名称]")
-            return
+            current_enabled = any(self.store.get_checkin_random_enabled(platform) for platform in self.apis.keys())
+            args = ['off' if current_enabled else 'on']
 
         value = args[0].lower()
         if value not in {'on', 'off'}:
@@ -552,11 +591,11 @@ class AdminHandlers:
         else:
             self.store.set_checkin_random_enabled(enabled, platform)
             scope = platform
-        status = '启用' if enabled else '禁用'
-        text = f"已对{scope}的随机鸡腿模式执行{status}操作。"
         if callback_result:
-            await self._send_callback_result(message, text)
+            await self._send_checkin_settings_panel(message)
         else:
+            status = '启用' if enabled else '禁用'
+            text = f"已对{scope}的随机鸡腿模式执行{status}操作。"
             await message.answer(text)
 
     async def cmd_lottery(self, message: types.Message, command: CommandObject):
@@ -662,13 +701,18 @@ class AdminHandlers:
         message = callback.message
         if action == 'status':
             await self._send_checkin_status(message, callback_result=True)
+        elif action == 'settings':
+            await self._send_checkin_settings_panel(message)
+        elif action == 'auto':
+            enabled = None if len(parts) <= 2 or parts[2] == 'toggle' else parts[2] == 'on'
+            await self._switch_checkin_auto(message, enabled, callback_result=True)
         elif action == 'run':
             platform = parts[2] if len(parts) > 2 else 'all'
             args = [] if platform == 'all' else [platform]
             await self._run_checkin(message, args, render_result=True)
         elif action == 'switch':
-            mode = parts[2] if len(parts) > 2 else 'on'
-            await self._switch_checkin_random(message, [mode], callback_result=True)
+            args = None if len(parts) <= 2 or parts[2] == 'toggle' else [parts[2]]
+            await self._switch_checkin_random(message, args, callback_result=True)
 
     async def cb_lottery_menu(self, callback: types.CallbackQuery):
         """抽奖管理菜单回调"""
@@ -709,14 +753,17 @@ class AdminHandlers:
             await self._send_rss_keyword_panel(message)
         elif action == 'status':
             await self._send_rss_status(message, config, callback_result=True)
+        elif action == 'toggle':
+            self.store.update_rss_config(enabled=not bool(config.get('enabled')))
+            await self._send_rss_panel(message)
         elif action == 'on':
             if not config.get('enabled'):
                 self.store.update_rss_config(enabled=True)
-            await self._send_rss_status(message, self.store.get_rss_config(), callback_result=True)
+            await self._send_rss_panel(message)
         elif action == 'off':
             if config.get('enabled'):
                 self.store.update_rss_config(enabled=False)
-            await self._send_rss_status(message, self.store.get_rss_config(), callback_result=True)
+            await self._send_rss_panel(message)
         elif action == 'poll':
             await self._run_rss_poll(message, callback_result=True)
         elif action == 'history':

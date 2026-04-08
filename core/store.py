@@ -52,6 +52,17 @@ class DataStore:
         C = Query()
         self.config.upsert({'key': key, 'value': value}, C.key == key)
 
+    def get_checkin_auto_enabled(self) -> bool:
+        value = self.get_config('checkin_auto_enabled')
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    def set_checkin_auto_enabled(self, enabled: bool):
+        self.set_config('checkin_auto_enabled', bool(enabled))
+
     def get_checkin_random_enabled(self, platform: Optional[str] = None) -> bool:
         key = self._checkin_random_config_key(platform)
         value = self.get_config(key)
