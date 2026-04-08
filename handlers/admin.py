@@ -473,6 +473,19 @@ class AdminHandlers:
         }
         return aliases.get(platform.lower())
 
+    @staticmethod
+    def _format_display_datetime(value: Optional[str]) -> str:
+        if not value:
+            return '未知'
+        try:
+            dt = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return str(value)
+        cst = timezone(timedelta(hours=8))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(cst).strftime('%Y-%m-%d %H:%M:%S CST')
+
     async def _run_checkin(self, message: types.Message, args: list[str], *, render_result: bool = False):
         """执行签到"""
         selected_platform = None
@@ -542,7 +555,7 @@ class AdminHandlers:
             lines.append(f"  随机鸡腿：{random_text}")
             lines.append(f"  今日：{done_text}")
             if status_record and status_record.get('checked_at'):
-                lines.append(f"  最后执行：{status_record['checked_at']}")
+                lines.append(f"  最后执行：{self._format_display_datetime(status_record['checked_at'])}")
             if last_message:
                 lines.append(f"  结果：{last_message}")
             lines.append("")
@@ -1045,7 +1058,7 @@ class AdminHandlers:
 
         enabled = "已启用" if config.get('enabled') else "已禁用"
         initialized = "已初始化" if config.get('initialized') else "未初始化"
-        last_poll = config.get('last_poll_at') or "未轮询"
+        last_poll = self._format_display_datetime(config.get('last_poll_at')) if config.get('last_poll_at') else "未轮询"
 
         cat_text = ', '.join(category_label(c) for c in categories) if categories else "无限制"
 
@@ -1055,8 +1068,7 @@ class AdminHandlers:
             f"初始化：{initialized}\n"
             f"最后轮询：{last_poll}\n"
             f"活跃关键词：{len(keywords)}\n"
-            f"版块筛选：{cat_text}\n"
-            f"RSS 地址：<code>{escape(settings.rss_url)}</code>"
+            f"版块筛选：{cat_text}"
         )
 
         if callback_result:

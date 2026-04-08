@@ -8,7 +8,7 @@
 import os
 from loguru import logger
 from typing import Optional, Dict, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from tinydb import TinyDB, Query
 from tinydb.storages import JSONStorage
@@ -99,7 +99,8 @@ class DataStore:
             checked_at = datetime.fromisoformat(record['checked_at'])
         except (TypeError, ValueError):
             return False
-        return checked_at.astimezone(timezone.utc).date() == datetime.now(timezone.utc).date()
+        cst = timezone(timedelta(hours=8))
+        return checked_at.astimezone(cst).date() == datetime.now(cst).date()
 
     @staticmethod
     def _checkin_status_config_key(platform: str) -> str:
