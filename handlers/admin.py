@@ -21,6 +21,57 @@ from core.store import DataStore
 from services.rss_poller import RSSPoller
 
 
+def _extract_prefixed_command_args(message_text: Optional[str], command_name: str, bot_username: Optional[str] = None) -> Optional[str]:
+    """兼容 '@bot /command ...' 形式，提取命令参数。"""
+    if not message_text:
+        return None
+
+    parts = message_text.strip().split()
+    if len(parts) < 2:
+        return None
+
+    mention_token = parts[0]
+    if not mention_token.startswith('@'):
+        return None
+
+    if bot_username and mention_token[1:].lower() != bot_username.lower().lstrip('@'):
+        return None
+
+    command_token = parts[1]
+    if not command_token.startswith('/'):
+        return None
+
+    command_body = command_token[1:].split('@', 1)[0].lower()
+    if command_body != command_name.lower():
+        return None
+
+    return ' '.join(parts[2:]).strip()
+
+
+def _extract_direct_command_args(message_text: Optional[str], command_name: str, bot_username: Optional[str] = None) -> Optional[str]:
+    """兼容 '/command@BotName ...' 形式，提取命令参数。"""
+    if not message_text:
+        return None
+
+    parts = message_text.strip().split()
+    if not parts:
+        return None
+
+    command_token = parts[0]
+    if not command_token.startswith('/'):
+        return None
+
+    command_spec = command_token[1:]
+    command_body, _, addressed_bot = command_spec.partition('@')
+    if command_body.lower() != command_name.lower():
+        return None
+
+    if addressed_bot and bot_username and addressed_bot.lower() != bot_username.lower().lstrip('@'):
+        return None
+
+    return ' '.join(parts[1:]).strip()
+
+
 class AdminHandlers:
     """管理员消息处理器"""
 
@@ -39,6 +90,7 @@ class AdminHandlers:
         self.apis = apis
         self.lucky_engine = lucky_engine
         self.rss_poller = rss_poller
+        self.bot_username = None
     
     async def _send_message(self, message: types.Message, text: str, reply_markup=None, parse_mode=None):
         """发送新消息。"""
@@ -127,14 +179,15 @@ class AdminHandlers:
 
     async def cmd_messenger(self, message: types.Message, command: CommandObject):
         """私聊管理入口"""
-        if not command.args:
+        args = self._get_command_args(message, command, 'messenger')
+        if not args:
             await self._send_messenger_panel(message)
             return
 
-        parts = command.args.split(maxsplit=1)
+        parts = args.split(maxsplit=1)
         action = parts[0].lower()
         # 重新构造不带 @bot 的参数文本，供 _get_target_id 使用
-        args_text = command.args
+        args_text = args
 
         if action == 'block':
             await self._messenger_block(message)
@@ -250,23 +303,29 @@ class AdminHandlers:
         enabled = bool(config.get('enabled'))
         enabled_text = '已启用' if enabled else '已禁用'
         toggle_text = '关闭自动轮询' if enabled else '开启自动轮询'
+        categories = config.get('categories', [])
+        category_text = f"已设置 {len(categories)} 个版块" if categories else '无限制'
+        keyword_count = len(self.store.list_rss_keywords())
+        keyword_text = f"共 {keyword_count} 个关键词"
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="查看状态", callback_data="rss:status")],
             [InlineKeyboardButton(text=toggle_text, callback_data="rss:toggle")],
             [InlineKeyboardButton(text="手动轮询一次", callback_data="rss:poll")],
+            [InlineKeyboardButton(text=f"版块筛选（{category_text}）", callback_data="rss:scope_panel")],
+            [InlineKeyboardButton(text=f"关键词管理（{keyword_text}）", callback_data="rss:keyword_panel")],
             [InlineKeyboardButton(text="查看推送历史", callback_data="rss:history:10")],
-            [InlineKeyboardButton(text="版块筛选", callback_data="rss:scope_panel")],
-            [InlineKeyboardButton(text="关键词管理", callback_data="rss:keyword_panel")],
             [InlineKeyboardButton(text="返回主菜单", callback_data="admin:start")],
         ])
         text = f"""RSS 订阅管理
 
 功能说明：
 • 自动轮询：{enabled_text}
+• 版块筛选：{category_text}
+• 关键词：{keyword_text}
 • 点击“{toggle_text}”可直接切换 RSS 自动轮询状态
-• 手动轮询一次 - 立即执行一次 RSS 源的拉取和内容检查
-• 查看推送历史 - 显示已推送给管理员的历史记录
-• 版块筛选 - 配置推送内容的版块过滤规则
+• 手动轮询一次 - 立即执行一次 RSS 源拉取与内容检查
+• 版块筛选 - 配置需要推送的版块范围
 • 关键词管理 - 添加、删除、启用或禁用关键词过滤"""
 
         await self._render_message(message, text, reply_markup=keyboard)
@@ -279,7 +338,7 @@ class AdminHandlers:
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="查看当前设置", callback_data="rss:scope:list")],
-            [InlineKeyboardButton(text="设置版块（如：技术,日常）", switch_inline_query_current_chat="/rss scope set ")],
+            [InlineKeyboardButton(text="设置版块", switch_inline_query_current_chat="/rss scope set ")],
             [InlineKeyboardButton(text="清除版块筛选", callback_data="rss:scope:reset")],
             [InlineKeyboardButton(text="返回 RSS 管理", callback_data="rss:panel")],
         ])
@@ -444,15 +503,54 @@ class AdminHandlers:
         """管理员文本回退帮助"""
         if message.text and message.text.startswith('/'):
             return
+        if await self._dispatch_prefixed_command(message):
+            return
         await self.cmd_help(message)
+
+    def _get_command_args(self, message: types.Message, command: Optional[CommandObject], command_name: str) -> Optional[str]:
+        """兼容标准命令、'/command@bot ...' 与 '@bot /command ...' 前缀形式。"""
+        if command and command.args is not None:
+            return command.args.strip()
+
+        direct_args = _extract_direct_command_args(message.text, command_name, self.bot_username)
+        if direct_args is not None:
+            return direct_args
+
+        return _extract_prefixed_command_args(message.text, command_name, self.bot_username)
+
+    def _match_prefixed_command(self, message: types.Message, command_name: str) -> bool:
+        """判断消息是否匹配 '@bot /command ...' 或 '/command@bot ...'。"""
+        return (
+            _extract_direct_command_args(message.text, command_name, self.bot_username) is not None
+            or _extract_prefixed_command_args(message.text, command_name, self.bot_username) is not None
+        )
+
+    async def _dispatch_prefixed_command(self, message: types.Message) -> bool:
+        """为未被 Command 过滤器接住的管理员消息做命令兜底分发。"""
+        command_handlers = [
+            ('start', self.cmd_start),
+            ('help', self.cmd_help),
+            ('messenger', self.cmd_messenger),
+            ('checkin', self.cmd_checkin),
+            ('lottery', self.cmd_lottery),
+            ('rss', self.cmd_rss),
+        ]
+
+        for command_name, handler in command_handlers:
+            if self._match_prefixed_command(message, command_name):
+                await handler(message, None) if command_name in {'messenger', 'checkin', 'lottery', 'rss'} else await handler(message)
+                return True
+
+        return False
 
     async def cmd_checkin(self, message: types.Message, command: CommandObject):
         """签到入口"""
-        if not command.args:
+        args = self._get_command_args(message, command, 'checkin')
+        if not args:
             await self._send_checkin_panel(message)
             return
 
-        parts = command.args.split()
+        parts = args.split()
         action = parts[0].lower()
         if action == 'switch':
             await self._switch_checkin_random(message, parts[1:])
@@ -613,11 +711,12 @@ class AdminHandlers:
 
     async def cmd_lottery(self, message: types.Message, command: CommandObject):
         """抽奖管理入口"""
-        if not command.args:
+        args = self._get_command_args(message, command, 'lottery')
+        if not args:
             await self._send_lottery_panel(message)
             return
 
-        parts = command.args.split()
+        parts = args.split()
         action = parts[0].lower()
         # lottery 子处理函数期望 parts[2] 作为 id，这里补位使其兼容
         full_parts = [None, action] + parts[1:]
@@ -785,14 +884,14 @@ class AdminHandlers:
         elif action == 'scope':
             subaction = parts[2] if len(parts) > 2 else ''
             if subaction == 'list':
-                await self._send_rss_scope_panel(message)
+                await self._handle_rss_scope(message, ['list'], config)
             elif subaction == 'reset':
                 self.store.update_rss_config(categories=[])
                 await self._send_rss_scope_panel(message)
         elif action == 'keyword':
             subaction = parts[2] if len(parts) > 2 else ''
             if subaction == 'list':
-                await self._send_rss_keyword_panel(message)
+                await self._handle_rss_keyword(message, ['list'])
 
     async def _lottery_view(self, message: types.Message, parts: list[str]):
         """查看任务详情"""
@@ -880,11 +979,12 @@ class AdminHandlers:
 
     async def cmd_rss(self, message: types.Message, command: CommandObject):
         """RSS 管理入口"""
-        if not command.args:
+        args = self._get_command_args(message, command, 'rss')
+        if not args:
             await self._send_rss_panel(message)
             return
 
-        raw_parts = command.args.split()
+        raw_parts = args.split()
         action = raw_parts[0].lower()
         config = self.store.get_rss_config()
 
@@ -1132,4 +1232,5 @@ class AdminHandlers:
 def setup_admin_handlers(dp: Dispatcher, store: DataStore, bot: Bot, apis: dict, lucky_engine=None, rss_poller=None):
     """设置管理员处理器"""
     handlers = AdminHandlers(store, bot, apis, lucky_engine, rss_poller)
+    dp["admin_handlers"] = handlers
     handlers.register(dp)

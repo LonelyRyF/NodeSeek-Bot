@@ -93,6 +93,12 @@ class BotApp:
         # 验证 cookies 并自动检测各平台 UID
         loop = asyncio.get_event_loop()
         await self._setup_bot_commands()
+
+        # 获取 Bot 用户名，供群聊命令兼容解析使用
+        me = await self.bot.get_me()
+        admin_handlers = self.dp["admin_handlers"]
+        admin_handlers.bot_username = me.username
+
         for platform, api in self.apis.items():
             valid = await loop.run_in_executor(None, api.check_cookies)
             if not valid:
